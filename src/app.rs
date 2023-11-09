@@ -4,7 +4,7 @@ use arboard::Clipboard;
 use eframe::{
     egui::{
         panel::TopBottomSide, Button, CentralPanel, Id, Key, KeyboardShortcut, LayerId, Modifiers,
-        Order, TextStyle, TopBottomPanel, Ui, Window,
+        Order, TextStyle, TopBottomPanel, Ui, WidgetText, Window,
     },
     emath::Align2,
     epaint::Color32,
@@ -62,19 +62,19 @@ pub struct IVApp<'a> {
 }
 
 pub fn bar_button_active(ui: &mut Ui, kind: ButtonKind, sc: KeyboardShortcut, desc: &str) -> bool {
-    let fmt = ui.ctx().format_shortcut(&sc);
-    ui.add(Button::new(kind.to_string()).shortcut_text(fmt))
+    let clicked = ui
+        .add(
+            Button::new(WidgetText::from(kind.name()).strong().raised())
+                .shortcut_text(ui.ctx().format_shortcut(&sc)),
+        )
         .on_hover_text(kind.name_button_popup(desc))
-        .clicked()
-        || ui.input_mut(|i| i.count_and_consume_key(sc.modifiers, sc.key) > 0)
+        .clicked();
+    clicked || ui.input_mut(|i| i.count_and_consume_key(sc.modifiers, sc.key) > 0)
 }
 
 impl<'a> IVApp<'a> {
     pub fn new(cc: &eframe::CreationContext, imgfiles: Vec<PathBuf>) -> Box<Self> {
-        log::debug!("image_files: {imgfiles:?}");
-        log::debug!("integration_info: {:#?}", cc.integration_info);
         egui_extras::install_image_loaders(&cc.egui_ctx);
-
         let cb_ctx = match Clipboard::new() {
             Ok(ok) => Some(ok),
             Err(err) => {
@@ -82,37 +82,13 @@ impl<'a> IVApp<'a> {
                 None
             }
         };
+        log::debug!("image_files: {imgfiles:?}");
+        log::debug!("integration_info: {:#?}", cc.integration_info);
         Box::new(Self {
             images: IVImages::new(imgfiles),
             cb_ctx,
             kind_event: None,
         })
-    }
-
-    pub fn top_panel(&mut self, ui: &mut Ui) {
-        // let open_shourtcut = KeyboardShortcut::new(modifiers, key)
-        eframe::egui::menu::bar(ui, |uibar| {
-            uibar.heading("IV - Image Viewer");
-            uibar.separator();
-            for (kind, sc, desc) in SHORTCUTS_AND_BUTTONS {
-                if bar_button_active(uibar, *kind, *sc, desc) {
-                    self.kind_event = Some(From::from(*kind));
-                }
-            }
-        });
-    }
-
-    pub fn central_panel(&mut self, ui: &mut Ui) {
-        preview_files_being_dropped(ui.ctx());
-
-        ui.input_mut(|input| {
-            if !input.raw.dropped_files.is_empty() {
-                self.images
-                    .extend_from_dropfile(input.raw.dropped_files.clone());
-                input.raw.dropped_files.clear();
-            }
-        });
-        self.images.draw(ui);
     }
 
     fn on_paste_event(&mut self) {
@@ -161,15 +137,37 @@ impl<'a> eframe::App for IVApp<'a> {
             self.kind_event = None;
         }
 
-        CentralPanel::default().show(ctx, |ui| self.central_panel(ui));
-        TopBottomPanel::new(TopBottomSide::Bottom, "iv_toppanel")
-            .show_animated(ctx, true, |ui| self.top_panel(ui));
-
-        Window::new("Settins").default_open(false).show(ctx, |ui| {
-            ctx.settings_ui(ui);
-            ui.separator();
-            ctx.inspection_ui(ui);
+        CentralPanel::default().show(ctx, |ui| {
+            preview_files_being_dropped(ui.ctx());
+            ui.input_mut(|input| {
+                if !input.raw.dropped_files.is_empty() {
+                    self.images
+                        .extend_from_dropfile(input.raw.dropped_files.clone());
+                    input.raw.dropped_files.clear();
+                }
+            });
+            self.images.draw(ui);
         });
+
+        TopBottomPanel::new(TopBottomSide::Bottom, "iv_toppanel").show_animated(ctx, true, |ui| {
+            eframe::egui::menu::bar(ui, |uibar| {
+                uibar.heading("IV - Image Viewer");
+                uibar.separator();
+                for (kind, sc, desc) in SHORTCUTS_AND_BUTTONS {
+                    if bar_button_active(uibar, *kind, *sc, desc) {
+                        self.kind_event = Some(From::from(*kind));
+                    }
+                }
+            });
+        });
+
+        if cfg!(debug_assertions) {
+            Window::new("Settins").default_open(false).show(ctx, |ui| {
+                ctx.settings_ui(ui);
+                ui.separator();
+                ctx.inspection_ui(ui);
+            });
+        }
     }
 
     fn post_rendering(&mut self, _window_size_px: [u32; 2], frame: &eframe::Frame) {

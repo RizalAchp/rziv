@@ -3,17 +3,12 @@
 mod app;
 mod button;
 mod images;
+mod logger;
 
 use app::IVApp;
 use clap::Parser;
-use eframe::{
-    epaint::{vec2, Vec2},
-    NativeOptions,
-};
-use log::LevelFilter;
+use eframe::{epaint, NativeOptions};
 use std::path::PathBuf;
-
-use rayon::iter::{ParallelBridge, ParallelIterator};
 
 #[derive(Debug, Clone, Parser)]
 pub struct CmdLine {
@@ -27,21 +22,29 @@ pub struct CmdLine {
 
 impl CmdLine {
     fn get_files(self) -> Vec<PathBuf> {
-        self.files
-            .unwrap_or_else(|| get_lists_curr_dir(self.recursive))
+        let Some(mut files) = self.files else {
+            return get_lists_curr_dir(self.recursive);
+        };
+        if files.len() == 1 {
+            let file = files[0].clone();
+            if file.is_dir() {
+                return read_dir_rec(file, self.recursive);
+            } else if let Some(par) = file.parent().map(|p| p.to_path_buf()) {
+                files.extend(read_dir_rec(par, self.recursive));
+                files.dedup();
+            }
+            files
+        } else {
+            files
+        }
     }
 }
 
-const INIT_SIZE_WINDOW: Vec2 = vec2(720.0, 480.0);
+const INIT_SIZE_WINDOW: epaint::Vec2 = epaint::vec2(720.0, 480.0);
 
 fn main() -> anyhow::Result<()> {
     let cmd = CmdLine::parse();
-    let level = if cmd.verbose {
-        LevelFilter::Debug
-    } else {
-        LevelFilter::Warn
-    };
-    env_logger::builder().filter_level(level).init();
+    logger::init_logger(cmd.verbose);
 
     let no = NativeOptions {
         drag_and_drop_support: true,
@@ -75,7 +78,6 @@ fn read_dir_rec(dir: PathBuf, recursive: bool) -> Vec<PathBuf> {
     };
 
     readdir
-        .par_bridge()
         .filter_map(|result_direntry| match result_direntry {
             Ok(entry) => {
                 if entry.file_type().is_ok_and(|x| x.is_dir() && recursive) {

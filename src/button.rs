@@ -35,9 +35,9 @@ pub enum ButtonKind {
     No,
 }
 
-impl std::fmt::Display for ButtonKind {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let s = match self {
+impl ButtonKind {
+    pub fn name(&self) -> &'static str {
+        match self {
             Self::Ok => "\u{2714}",
             Self::Cancel => "\u{1F6AB}",
             Self::Apply => "\u{2714}",
@@ -68,15 +68,20 @@ impl std::fmt::Display for ButtonKind {
             Self::Paste => "\u{1F4CB}",
             Self::Cut => "\u{2702}",
             Self::No => "\u{2718}",
-        };
-        f.write_str(s)
+        }
+    }
+}
+
+impl std::fmt::Display for ButtonKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name())
     }
 }
 
 impl ButtonKind {
     #[inline(always)]
     pub fn name_button_popup(self, desc: &'_ str) -> String {
-        format!("clickk '{self}' to {desc}")
+        format!("click '{self}' to {desc}")
     }
 }
 

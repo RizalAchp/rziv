@@ -1,5 +1,6 @@
 use std::{
     borrow::Cow,
+    fmt::Debug,
     path::{Path, PathBuf},
 };
 
@@ -16,75 +17,95 @@ use eframe::{
     Frame,
 };
 use image::ImageFormat;
-use rayon::prelude::{IntoParallelIterator, ParallelIterator};
+
+#[derive(Clone)]
+enum ImgSourceType<'s> {
+    Buffer,
+    Uri,
+    Path(Cow<'s, Path>),
+}
 
 #[derive(Clone)]
 struct Img<'img> {
     fmt: ImageFormat,
-    source: ImageSource<'img>,
+    source: ImgSourceType<'img>,
+    content: Option<ImageSource<'img>>,
 }
-impl std::fmt::Debug for Img<'_> {
+impl Debug for Img<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Img")
-            .field("fmt", &self.fmt)
-            .field(
-                "source",
-                match &self.source {
-                    ImageSource::Uri(uri) => uri,
-                    ImageSource::Texture(i) => i,
-                    ImageSource::Bytes { uri, .. } => uri,
-                },
-            )
-            .finish()
+        let mut dbg = f.debug_struct("Img");
+        dbg.field("fmt", &self.fmt);
+        match &self.source {
+            ImgSourceType::Uri => dbg.field("source", &"Uri"),
+            ImgSourceType::Buffer => dbg.field("source", &"buffer"),
+            ImgSourceType::Path(path) => dbg.field("source", path),
+        };
+        dbg.finish()
     }
 }
 
 impl<'i> Img<'i> {
-    #[inline]
-    fn from_bytes(fmt: ImageFormat, uri: Option<String>, bytes: Vec<u8>) -> Self {
-        Self {
-            fmt,
-            source: ImageSource::Bytes {
-                uri: Cow::Owned(
-                    uri.unwrap_or(format!("bytes://bytes_image.{}", fmt.extensions_str()[0])),
-                ),
-                bytes: Bytes::Shared(bytes.into()),
-            },
+    fn image(&mut self) -> Option<Image<'i>> {
+        if let Some(ref content) = self.content {
+            return Some(Image::new(content.clone()).texture_options(TextureOptions::NEAREST));
         }
-    }
 
+        self.content = match &self.source {
+            ImgSourceType::Path(path) => match std::fs::read(path) {
+                Ok(ok) => Some(ImageSource::Bytes {
+                    uri: format!("bytes:/{}", path.display()).into(),
+                    bytes: ok.into(),
+                }),
+                Err(err) => {
+                    log::error!(
+                        "Failed to read content of file: {} - (Reason: {err})",
+                        path.display()
+                    );
+                    None
+                }
+            },
+            _ => None,
+        };
+        None
+    }
+}
+
+impl<'i> Img<'i> {
     #[allow(unused)]
     fn from_uri(fmt: ImageFormat, uri: String) -> Self {
         Self {
             fmt,
-            source: ImageSource::Uri(uri.into()),
+            source: ImgSourceType::Uri,
+            content: Some(ImageSource::Uri(uri.into())),
         }
     }
-
-    fn from_path(fmt: ImageFormat, path: impl AsRef<Path>) -> Option<Self> {
-        let path = path.as_ref();
-        match std::fs::read(path) {
-            Ok(bytes) => Some(Self::from_bytes(
-                fmt,
-                Some(format!("bytes:/{}", path.display())),
-                bytes,
-            )),
-            Err(err) => {
-                log::error!("ERROR: Failed to read contents of image - {err}");
-                None
-            }
+    fn from_path(fmt: ImageFormat, path: PathBuf) -> Self {
+        Self {
+            fmt,
+            source: ImgSourceType::Path(path.into()),
+            content: None,
+        }
+    }
+    fn from_bytes(fmt: ImageFormat, bytes: impl Into<Bytes>) -> Self {
+        Self {
+            fmt,
+            source: ImgSourceType::Buffer,
+            content: Some(ImageSource::Bytes {
+                uri: "bytes://dynbytes.png".into(),
+                bytes: bytes.into(),
+            }),
         }
     }
 
     #[inline]
     fn from_paths<I>(paths: I) -> Vec<Self>
     where
-        I: IntoParallelIterator<Item = PathBuf>,
+        I: IntoIterator<Item = PathBuf>,
     {
         paths
-            .into_par_iter()
+            .into_iter()
             .filter_map(filter_map_images_file)
-            .filter_map(|(fmt, path)| Self::from_path(fmt, path))
+            .map(|(fmt, path)| Self::from_path(fmt, path))
             .collect()
     }
 }
@@ -92,7 +113,6 @@ impl<'i> Img<'i> {
 #[derive(Debug)]
 pub struct IVImages<'img> {
     images_sources: Vec<Img<'img>>,
-    texture_options: TextureOptions,
     rect: Rect,
     size: Option<Vec2>,
     zoom: Vec2,
@@ -105,7 +125,6 @@ impl<'img> IVImages<'img> {
         let images_sources = Img::from_paths(paths);
         Self {
             images_sources,
-            texture_options: TextureOptions::NEAREST,
             size: None,
             rect: Rect::ZERO,
             zoom: Vec2::splat(1f32),
@@ -116,15 +135,15 @@ impl<'img> IVImages<'img> {
 
     pub fn extend_from_dropfile<I>(&mut self, paths: I)
     where
-        I: IntoParallelIterator<Item = DroppedFile>,
+        I: IntoIterator<Item = DroppedFile>,
     {
         self.images_sources.extend(
             paths
-                .into_par_iter()
+                .into_iter()
                 .filter_map(|x| {
                     x.path
                         .and_then(filter_map_images_file)
-                        .and_then(|(fmt, path)| Img::from_path(fmt, path))
+                        .map(|(fmt, path)| Img::from_path(fmt, path))
                 })
                 .collect::<Vec<_>>(),
         )
@@ -146,7 +165,7 @@ impl<'img> IVImages<'img> {
             return;
         }
         self.images_sources
-            .push(Img::from_bytes(ImageFormat::Png, None, buffer.into_inner()))
+            .push(Img::from_bytes(ImageFormat::Png, buffer.into_inner()))
     }
 
     #[allow(unused)]
@@ -226,10 +245,13 @@ impl IVImages<'_> {
             }
         });
 
-        let Some(Img { fmt: _, source }) = self.images_sources.get(self.showed_idx) else {
+        let Some(img) = self.images_sources.get_mut(self.showed_idx) else {
             return res;
         };
-        let image = Image::new(source.clone()).texture_options(self.texture_options);
+        let Some(image) = img.image() else {
+            Spinner::new().paint_at(ui, self.rect);
+            return res;
+        };
 
         let size = self.size.unwrap_or(res.rect.size()) * self.zoom;
         let tlr = image.load_for_size(ui.ctx(), size);
